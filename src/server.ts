@@ -54,17 +54,17 @@ function last<T>(arr: T[]): T {
 
 function computeIndicators(candles: Candle[]) {
   const closes = candles.map((c) => c.close);
-  const highs  = candles.map((c) => c.high);
-  const lows   = candles.map((c) => c.low);
+  const highs = candles.map((c) => c.high);
+  const lows = candles.map((c) => c.low);
 
   /* RSI(14) */
   const rsiValues = RSI.calculate({ values: closes, period: 14 });
   const rsi = last(rsiValues);
 
   /* EMA(50) & EMA(200) for trend direction */
-  const ema50Values  = EMA.calculate({ values: closes, period: 50 });
+  const ema50Values = EMA.calculate({ values: closes, period: 50 });
   const ema200Values = EMA.calculate({ values: closes, period: 200 });
-  const ema50  = last(ema50Values);
+  const ema50 = last(ema50Values);
   const ema200 = last(ema200Values);
 
   /* MACD(12,26,9) */
@@ -77,9 +77,9 @@ function computeIndicators(candles: Candle[]) {
     SimpleMASignal: false,
   });
   const macdLatest = last(macdResult);
-  const macdLine   = macdLatest?.MACD   ?? 0;
+  const macdLine = macdLatest?.MACD ?? 0;
   const signalLine = macdLatest?.signal ?? 0;
-  const histogram  = macdLatest?.histogram ?? 0;
+  const histogram = macdLatest?.histogram ?? 0;
 
   /* Bollinger Bands(20, 2) */
   const bbResult = BollingerBands.calculate({
@@ -90,37 +90,62 @@ function computeIndicators(candles: Candle[]) {
   const bb = last(bbResult);
 
   /* ATR(14) — used for dynamic SL/TP */
-  const atrValues = ATR.calculate({ high: highs, low: lows, close: closes, period: 14 });
+  const atrValues = ATR.calculate({
+    high: highs,
+    low: lows,
+    close: closes,
+    period: 14,
+  });
   const atr = last(atrValues);
 
   /* Volume trend: compare last 5 bars average vs previous 5 bars average */
-  const recentVol  = candles.slice(-5).reduce((s, c) => s + c.volume, 0) / 5;
-  const prevVol    = candles.slice(-10, -5).reduce((s, c) => s + c.volume, 0) / 5;
-  const volumeTrend = recentVol > prevVol * 1.2 ? "rising" : recentVol < prevVol * 0.8 ? "falling" : "neutral";
+  const recentVol = candles.slice(-5).reduce((s, c) => s + c.volume, 0) / 5;
+  const prevVol = candles.slice(-10, -5).reduce((s, c) => s + c.volume, 0) / 5;
+  const volumeTrend =
+    recentVol > prevVol * 1.2
+      ? "rising"
+      : recentVol < prevVol * 0.8
+        ? "falling"
+        : "neutral";
 
   const price = last(closes);
 
-  return { price, rsi, ema50, ema200, macdLine, signalLine, histogram, bb, atr, volumeTrend };
+  return {
+    price,
+    rsi,
+    ema50,
+    ema200,
+    macdLine,
+    signalLine,
+    histogram,
+    bb,
+    atr,
+    volumeTrend,
+  };
 }
 
 // ─── Rule-based pre-signal (sanity guard) ───────────────────────────────────
 // Returns a suggested direction that the AI result is validated against.
-function ruleBasedSignal(ind: ReturnType<typeof computeIndicators>): "BUY" | "SELL" | "HOLD" {
-  const { price, rsi, ema50, ema200, macdLine, signalLine, histogram, bb } = ind;
+function ruleBasedSignal(
+  ind: ReturnType<typeof computeIndicators>,
+): "BUY" | "SELL" | "HOLD" {
+  const { price, rsi, ema50, ema200, macdLine, signalLine, histogram, bb } =
+    ind;
 
-  const bullishTrend  = price > ema50 && ema50 > ema200;
-  const bearishTrend  = price < ema50 && ema50 < ema200;
-  const macdCrossUp   = macdLine > signalLine && histogram > 0;
+  const bullishTrend = price > ema50 && ema50 > ema200;
+  const bearishTrend = price < ema50 && ema50 < ema200;
+  const macdCrossUp = macdLine > signalLine && histogram > 0;
   const macdCrossDown = macdLine < signalLine && histogram < 0;
-  const rsiOversold   = rsi < 38;
+  const rsiOversold = rsi < 38;
   const rsiOverbought = rsi > 65;
-  const nearLowerBB   = bb ? price <= bb.lower * 1.005 : false;
-  const nearUpperBB   = bb ? price >= bb.upper * 0.995 : false;
+  const nearLowerBB = bb ? price <= bb.lower * 1.005 : false;
+  const nearUpperBB = bb ? price >= bb.upper * 0.995 : false;
 
   // Strong BUY: trend up + MACD up + RSI oversold or near lower BB
   if (bullishTrend && macdCrossUp && (rsiOversold || nearLowerBB)) return "BUY";
   // Strong SELL: trend down + MACD down + RSI overbought or near upper BB
-  if (bearishTrend && macdCrossDown && (rsiOverbought || nearUpperBB)) return "SELL";
+  if (bearishTrend && macdCrossDown && (rsiOverbought || nearUpperBB))
+    return "SELL";
 
   return "HOLD";
 }
@@ -129,9 +154,20 @@ function ruleBasedSignal(ind: ReturnType<typeof computeIndicators>): "BUY" | "SE
 async function getAIPrediction(
   symbol: string,
   ind: ReturnType<typeof computeIndicators>,
-  ruleSignal: string
+  ruleSignal: string,
 ) {
-  const { price, rsi, ema50, ema200, macdLine, signalLine, histogram, bb, atr, volumeTrend } = ind;
+  const {
+    price,
+    rsi,
+    ema50,
+    ema200,
+    macdLine,
+    signalLine,
+    histogram,
+    bb,
+    atr,
+    volumeTrend,
+  } = ind;
 
   // Dynamic SL/TP based on ATR (1× ATR for SL, 2× ATR for TP)
   const slDist = atr ? atr * 1.0 : price * 0.003;
@@ -212,28 +248,50 @@ Respond ONLY with raw JSON. No markdown, no code fences, no explanation outside 
 // Ensures the AI return values make physical sense.
 function validatePrediction(pred: any, price: number): any {
   if (!pred || !["BUY", "SELL", "HOLD"].includes(pred.signal)) {
-    return { signal: "HOLD", stopLoss: 0, takeProfit: 0, confidence: 0, reason: "Invalid AI response — defaulting to HOLD." };
+    return {
+      signal: "HOLD",
+      stopLoss: 0,
+      takeProfit: 0,
+      confidence: 0,
+      reason: "Invalid AI response — defaulting to HOLD.",
+    };
   }
 
-  const sl  = Number(pred.stopLoss)   || 0;
-  const tp  = Number(pred.takeProfit) || 0;
+  const sl = Number(pred.stopLoss) || 0;
+  const tp = Number(pred.takeProfit) || 0;
   const sig = pred.signal as "BUY" | "SELL" | "HOLD";
 
   if (sig === "BUY") {
     if (sl >= price) {
-      return { ...pred, stopLoss: price * 0.997, reason: pred.reason + " [SL corrected: was above entry]" };
+      return {
+        ...pred,
+        stopLoss: price * 0.997,
+        reason: pred.reason + " [SL corrected: was above entry]",
+      };
     }
     if (tp <= price) {
-      return { ...pred, takeProfit: price * 1.005, reason: pred.reason + " [TP corrected: was below entry]" };
+      return {
+        ...pred,
+        takeProfit: price * 1.005,
+        reason: pred.reason + " [TP corrected: was below entry]",
+      };
     }
   }
 
   if (sig === "SELL") {
     if (sl <= price) {
-      return { ...pred, stopLoss: price * 1.003, reason: pred.reason + " [SL corrected: was below entry]" };
+      return {
+        ...pred,
+        stopLoss: price * 1.003,
+        reason: pred.reason + " [SL corrected: was below entry]",
+      };
     }
     if (tp >= price) {
-      return { ...pred, takeProfit: price * 0.995, reason: pred.reason + " [TP corrected: was above entry]" };
+      return {
+        ...pred,
+        takeProfit: price * 0.995,
+        reason: pred.reason + " [TP corrected: was above entry]",
+      };
     }
   }
 
@@ -248,10 +306,10 @@ async function generateSignal(symbol: string) {
   );
 
   const candles: Candle[] = market.data.map((c: any) => ({
-    open:   parseFloat(c[1]),
-    high:   parseFloat(c[2]),
-    low:    parseFloat(c[3]),
-    close:  parseFloat(c[4]),
+    open: parseFloat(c[1]),
+    high: parseFloat(c[2]),
+    low: parseFloat(c[3]),
+    close: parseFloat(c[4]),
     volume: parseFloat(c[5]),
   }));
 
@@ -266,52 +324,66 @@ async function generateSignal(symbol: string) {
   }
 
   const ruleSignal = ruleBasedSignal(ind);
-  const aiText     = await getAIPrediction(symbol, ind, ruleSignal);
-  const parsed     = extractJSON(aiText);
-  const validated  = validatePrediction(parsed, ind.price);
+  const aiText = await getAIPrediction(symbol, ind, ruleSignal);
+  const parsed = extractJSON(aiText);
+  const validated = validatePrediction(parsed, ind.price);
 
   // Confidence gate
-  if (validated.signal !== ruleSignal && ruleSignal !== "HOLD" && validated.confidence < 70) {
-    validated.signal    = "HOLD";
-    validated.stopLoss  = 0;
+  if (
+    validated.signal !== ruleSignal &&
+    ruleSignal !== "HOLD" &&
+    validated.confidence < 70
+  ) {
+    validated.signal = "HOLD";
+    validated.stopLoss = 0;
     validated.takeProfit = 0;
-    validated.reason   += ` [Overridden to HOLD: AI confidence too low to contradict rule signal '${ruleSignal}']`;
+    validated.reason += ` [Overridden to HOLD: AI confidence too low to contradict rule signal '${ruleSignal}']`;
   }
 
   const payload = {
-    pair:      symbol,
+    pair: symbol,
     timeframe: "15m",
-    price:     ind.price,
+    price: ind.price,
     indicators: {
-      rsi:            ind.rsi,
-      ema50:          ind.ema50,
-      ema200:         ind.ema200,
-      macd:           { line: ind.macdLine, signal: ind.signalLine, histogram: ind.histogram },
-      bollingerBands: { upper: ind.bb.upper, middle: ind.bb.middle, lower: ind.bb.lower },
-      atr:            ind.atr,
-      volumeTrend:    ind.volumeTrend,
+      rsi: ind.rsi,
+      ema50: ind.ema50,
+      ema200: ind.ema200,
+      macd: {
+        line: ind.macdLine,
+        signal: ind.signalLine,
+        histogram: ind.histogram,
+      },
+      bollingerBands: {
+        upper: ind.bb.upper,
+        middle: ind.bb.middle,
+        lower: ind.bb.lower,
+      },
+      atr: ind.atr,
+      volumeTrend: ind.volumeTrend,
     },
     ruleBasedSignal: ruleSignal,
-    aiPrediction:    validated,
+    aiPrediction: validated,
   };
 
   // Fire-and-forget email for BUY / SELL
   if (validated.signal === "BUY" || validated.signal === "SELL") {
     sendSignalEmail({
       symbol,
-      price:       ind.price,
-      signal:      validated.signal,
-      stopLoss:    validated.stopLoss,
-      takeProfit:  validated.takeProfit,
-      confidence:  validated.confidence,
-      reason:      validated.reason ?? "",
+      price: ind.price,
+      signal: validated.signal,
+      stopLoss: validated.stopLoss,
+      takeProfit: validated.takeProfit,
+      confidence: validated.confidence,
+      reason: validated.reason ?? "",
       ruleSignal,
-      rsi:         ind.rsi,
-      ema50:       ind.ema50,
-      ema200:      ind.ema200,
-      atr:         ind.atr,
+      rsi: ind.rsi,
+      ema50: ind.ema50,
+      ema200: ind.ema200,
+      atr: ind.atr,
       volumeTrend: ind.volumeTrend,
-    }).catch((err) => console.error(`[Email] Failed to send for ${symbol}:`, err.message));
+    }).catch((err) =>
+      console.error(`[Email] Failed to send for ${symbol}:`, err.message),
+    );
   }
 
   return payload;
@@ -325,15 +397,17 @@ app.get("/signal/:symbol", async (req: Request<Params>, res: Response) => {
     res.json(result);
   } catch (error: any) {
     console.error(error?.message ?? error);
-    res.status(500).json({ error: "Failed to generate prediction", detail: error?.message });
+    res
+      .status(500)
+      .json({ error: "Failed to generate prediction", detail: error?.message });
   }
 });
 
 // ─── Email Transporter ───────────────────────────────────────────────────────
 const transporter = nodemailer.createTransport({
-  host:   process.env.MAIL_HOST ?? "smtp.gmail.com",
-  port:   Number(process.env.MAIL_PORT ?? 587),
-  secure: false,          // true for port 465, false for 587 (STARTTLS)
+  host: process.env.MAIL_HOST ?? "smtp.gmail.com",
+  port: Number(process.env.MAIL_PORT ?? 587),
+  secure: false, // true for port 465, false for 587 (STARTTLS)
   auth: {
     user: process.env.MAIL_USER,
     pass: process.env.MAIL_PASS,
@@ -341,23 +415,23 @@ const transporter = nodemailer.createTransport({
 });
 
 async function sendSignalEmail(payload: {
-  symbol:     string;
-  price:      number;
-  signal:     string;
-  stopLoss:   number;
+  symbol: string;
+  price: number;
+  signal: string;
+  stopLoss: number;
   takeProfit: number;
   confidence: number;
-  reason:     string;
+  reason: string;
   ruleSignal: string;
-  rsi:        number;
-  ema50:      number;
-  ema200:     number;
-  atr:        number;
+  rsi: number;
+  ema50: number;
+  ema200: number;
+  atr: number;
   volumeTrend: string;
 }) {
-  const isBuy    = payload.signal === "BUY";
-  const color    = isBuy ? "#00c853" : "#d50000";
-  const emoji    = isBuy ? "🟢" : "🔴";
+  const isBuy = payload.signal === "BUY";
+  const color = isBuy ? "#00c853" : "#d50000";
+  const emoji = isBuy ? "🟢" : "🔴";
   const riskNote = isBuy
     ? `Stop Loss <b>${payload.stopLoss.toFixed(6)}</b> | Take Profit <b>${payload.takeProfit.toFixed(6)}</b>`
     : `Stop Loss <b>${payload.stopLoss.toFixed(6)}</b> | Take Profit <b>${payload.takeProfit.toFixed(6)}</b>`;
@@ -395,13 +469,15 @@ async function sendSignalEmail(payload: {
   `;
 
   await transporter.sendMail({
-    from:    `"Crypto Signal Bot" <${process.env.MAIL_USER}>`,
-    to:      process.env.MAIL_TO,
+    from: `"Crypto Signal Bot" <${process.env.MAIL_USER}>`,
+    to: process.env.MAIL_TO,
     subject: `${emoji} ${payload.signal} — ${payload.symbol} @ ${payload.price.toFixed(4)} | Confidence: ${payload.confidence}%`,
     html,
   });
 
-  console.log(`[Email] ${payload.signal} alert sent for ${payload.symbol} to ${process.env.MAIL_TO}`);
+  console.log(
+    `[Email] ${payload.signal} alert sent for ${payload.symbol} to ${process.env.MAIL_TO}`,
+  );
 }
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -419,26 +495,38 @@ app.listen(PORT, () => {
   const intervalMs = Number(process.env.POLL_INTERVAL_MS ?? 30_000);
 
   if (watchSymbols.length === 0) {
-    console.log("[Scheduler] No WATCH_SYMBOLS set in .env — scheduler is disabled.");
-    console.log("[Scheduler] To enable, add: WATCH_SYMBOLS=BTCUSDT,ETHUSDT to .env");
+    console.log(
+      "[Scheduler] No WATCH_SYMBOLS set in .env — scheduler is disabled.",
+    );
+    console.log(
+      "[Scheduler] To enable, add: WATCH_SYMBOLS=BTCUSDT,ETHUSDT to .env",
+    );
     return;
   }
 
-  console.log(`[Scheduler] Watching: ${watchSymbols.join(", ")} every ${intervalMs / 1000}s`);
+  console.log(
+    `[Scheduler] Watching: ${watchSymbols.join(", ")} every ${intervalMs / 1000}s`,
+  );
 
   // Run once immediately on startup, then every intervalMs
   const runAll = () => {
     const timestamp = new Date().toISOString();
-    console.log(`\n[Scheduler] ⏱  ${timestamp} — scanning ${watchSymbols.length} symbol(s)...`);
+    console.log(
+      `\n[Scheduler] ⏱  ${timestamp} — scanning ${watchSymbols.length} symbol(s)...`,
+    );
     for (const sym of watchSymbols) {
       generateSignal(sym)
         .then((r) => {
           const sig = r.aiPrediction.signal;
           const conf = r.aiPrediction.confidence;
           const emoji = sig === "BUY" ? "🟢" : sig === "SELL" ? "🔴" : "⚪";
-          console.log(`[Scheduler] ${emoji} ${sym}: ${sig} (confidence: ${conf}%) @ ${r.price}`);
+          console.log(
+            `[Scheduler] ${emoji} ${sym}: ${sig} (confidence: ${conf}%) @ ${r.price}`,
+          );
         })
-        .catch((err) => console.error(`[Scheduler] ❌ ${sym} failed:`, err.message));
+        .catch((err) =>
+          console.error(`[Scheduler] ❌ ${sym} failed:`, err.message),
+        );
     }
   };
 
