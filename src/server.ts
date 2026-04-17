@@ -136,15 +136,16 @@ function ruleBasedSignal(
   const bearishTrend = price < ema50 && ema50 < ema200;
   const macdCrossUp = macdLine > signalLine && histogram > 0;
   const macdCrossDown = macdLine < signalLine && histogram < 0;
-  const rsiOversold = rsi < 38;
-  const rsiOverbought = rsi > 65;
+  const rsiOversold = rsi < 45;
+  const rsiOverbought = rsi > 60;
   const nearLowerBB = bb ? price <= bb.lower * 1.005 : false;
   const nearUpperBB = bb ? price >= bb.upper * 0.995 : false;
 
-  // Strong BUY: trend up + MACD up + RSI oversold or near lower BB
-  if (bullishTrend && macdCrossUp && (rsiOversold || nearLowerBB)) return "BUY";
-  // Strong SELL: trend down + MACD down + RSI overbought or near upper BB
-  if (bearishTrend && macdCrossDown && (rsiOverbought || nearUpperBB))
+  // BUY: (Confirmed uptrend + MACD up) OR (MACD up + RSI oversold)
+  if ((bullishTrend && macdCrossUp) || (macdCrossUp && rsiOversold))
+    return "BUY";
+  // SELL: (Confirmed downtrend + MACD down) OR (MACD down + RSI overbought)
+  if ((bearishTrend && macdCrossDown) || (macdCrossDown && rsiOverbought))
     return "SELL";
 
   return "HOLD";
@@ -156,24 +157,25 @@ async function getAIPrediction(
   ind: ReturnType<typeof computeIndicators>,
   ruleSignal: string,
 ) {
-  const {
-    price,
-    rsi,
-    ema50,
-    ema200,
-    macdLine,
-    signalLine,
-    histogram,
-    bb,
-    atr,
-    volumeTrend,
-  } = ind;
+  try {
+    const {
+      price,
+      rsi,
+      ema50,
+      ema200,
+      macdLine,
+      signalLine,
+      histogram,
+      bb,
+      atr,
+      volumeTrend,
+    } = ind;
 
-  // Dynamic SL/TP based on ATR (1× ATR for SL, 2× ATR for TP)
-  const slDist = atr ? atr * 1.0 : price * 0.003;
-  const tpDist = atr ? atr * 2.0 : price * 0.006;
+    // Dynamic SL/TP based on ATR (1× ATR for SL, 2× ATR for TP)
+    const slDist = atr ? atr * 1.0 : price * 0.003;
+    const tpDist = atr ? atr * 2.0 : price * 0.006;
 
-  const prompt = `
+    const prompt = `
 You are a professional crypto trading analyst. Analyze the following technical data and produce a strict JSON signal.
 
 === MARKET DATA ===
@@ -235,13 +237,50 @@ Respond ONLY with raw JSON. No markdown, no code fences, no explanation outside 
 }
 `;
 
-  const response = await axios.post("http://127.0.0.1:11434/api/generate", {
-    model: "llama3",
-    prompt,
-    stream: false,
-  });
+    console.log(`[AI] Sending request to Ollama for ${symbol}...`);
+    const startTime = Date.now();
 
-  return response.data.response as string;
+    const response = await axios.post(
+      "http://127.0.0.1:11434/api/generate",
+      {
+        model: "llama3",
+        prompt,
+        stream: false,
+      },
+      {
+        timeout: 60000,
+      },
+    );
+
+    const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[AI] Ollama responded in ${elapsedTime}s for ${symbol}`);
+
+    return response.data.response as string;
+  } catch (error: any) {
+    if (error.code === "ECONNREFUSED") {
+      console.error(
+        "❌ [AI] Cannot connect to Ollama at http://127.0.0.1:11434",
+      );
+      console.error("   Make sure Ollama is running: ollama serve");
+    } else if (error.code === "ENOTFOUND") {
+      console.error("[AI] ❌ Ollama host not found (http://127.0.0.1:11434)");
+    } else if (error.message.includes("timeout")) {
+      console.error(`[AI] ❌ Ollama request timeout (${error.message})`);
+      console.error(
+        "   Ollama is running but slow. Check system resources or increase timeout.",
+      );
+    } else {
+      console.error("[AI] Error in getAIPrediction:", error?.message ?? error);
+    }
+
+    return JSON.stringify({
+      signal: "HOLD",
+      stopLoss: 0,
+      takeProfit: 0,
+      confidence: 0,
+      reason: "Error fetching AI prediction: " + (error?.message ?? error),
+    });
+  }
 }
 
 // ─── Signal validation guard ─────────────────────────────────────────────────
@@ -301,92 +340,131 @@ function validatePrediction(pred: any, price: number): any {
 // ─── Core signal generator (shared by route + scheduler) ────────────────────
 async function generateSignal(symbol: string) {
   // Fetch 15-minute candles (500 is enough for EMA200 + all indicators)
-  const market = await axios.get(
-    `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&limit=500`,
-  );
+  try {
+    const market = await axios.get(
+      `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&limit=500`,
+    );
 
-  const candles: Candle[] = market.data.map((c: any) => ({
-    open: parseFloat(c[1]),
-    high: parseFloat(c[2]),
-    low: parseFloat(c[3]),
-    close: parseFloat(c[4]),
-    volume: parseFloat(c[5]),
-  }));
+    const candles: Candle[] = market.data.map((c: any) => ({
+      open: parseFloat(c[1]),
+      high: parseFloat(c[2]),
+      low: parseFloat(c[3]),
+      close: parseFloat(c[4]),
+      volume: parseFloat(c[5]),
+    }));
 
-  if (candles.length < 220) {
-    throw new Error("Not enough candle data to compute indicators.");
-  }
+    if (candles.length < 220) {
+      throw new Error("Not enough candle data to compute indicators.");
+    }
 
-  const ind = computeIndicators(candles);
+    const ind = computeIndicators(candles);
 
-  if (!ind.rsi || !ind.ema50 || !ind.ema200 || !ind.bb || !ind.atr) {
-    throw new Error("Failed to compute one or more indicators.");
-  }
+    if (!ind.rsi || !ind.ema50 || !ind.ema200 || !ind.bb || !ind.atr) {
+      throw new Error("Failed to compute one or more indicators.");
+    }
+    const ruleSignal = ruleBasedSignal(ind);
 
-  const ruleSignal = ruleBasedSignal(ind);
-  const aiText = await getAIPrediction(symbol, ind, ruleSignal);
-  const parsed = extractJSON(aiText);
-  const validated = validatePrediction(parsed, ind.price);
+    // Check if AI is enabled (default: true)
+    const useAI = (process.env.USE_AI ?? "true").toLowerCase() === "true";
+    let validated;
 
-  // Confidence gate
-  if (
-    validated.signal !== ruleSignal &&
-    ruleSignal !== "HOLD" &&
-    validated.confidence < 70
-  ) {
-    validated.signal = "HOLD";
-    validated.stopLoss = 0;
-    validated.takeProfit = 0;
-    validated.reason += ` [Overridden to HOLD: AI confidence too low to contradict rule signal '${ruleSignal}']`;
-  }
+    if (useAI) {
+      const aiText = await getAIPrediction(symbol, ind, ruleSignal);
+      const parsed = extractJSON(aiText);
+      validated = validatePrediction(parsed, ind.price);
 
-  const payload = {
-    pair: symbol,
-    timeframe: "15m",
-    price: ind.price,
-    indicators: {
-      rsi: ind.rsi,
-      ema50: ind.ema50,
-      ema200: ind.ema200,
-      macd: {
-        line: ind.macdLine,
-        signal: ind.signalLine,
-        histogram: ind.histogram,
-      },
-      bollingerBands: {
-        upper: ind.bb.upper,
-        middle: ind.bb.middle,
-        lower: ind.bb.lower,
-      },
-      atr: ind.atr,
-      volumeTrend: ind.volumeTrend,
-    },
-    ruleBasedSignal: ruleSignal,
-    aiPrediction: validated,
-  };
+      // Confidence gate
+      if (
+        validated.signal !== ruleSignal &&
+        ruleSignal !== "HOLD" &&
+        validated.confidence < 70
+      ) {
+        validated.signal = "HOLD";
+        validated.stopLoss = 0;
+        validated.takeProfit = 0;
+        validated.reason += ` [Overridden to HOLD: AI confidence too low to contradict rule signal '${ruleSignal}']`;
+      }
+    } else {
+      // Use rule-based signal only
+      console.log(`[Signal] Using rule-based signal only for ${symbol}`);
+      const slDist = ind.atr ? ind.atr * 1.0 : ind.price * 0.003;
+      const tpDist = ind.atr ? ind.atr * 2.0 : ind.price * 0.006;
 
-  // Fire-and-forget email for BUY / SELL
-  if (validated.signal === "BUY" || validated.signal === "SELL") {
-    sendSignalEmail({
-      symbol,
+      validated = {
+        signal: ruleSignal,
+        stopLoss:
+          ruleSignal === "BUY"
+            ? ind.price - slDist
+            : ruleSignal === "SELL"
+              ? ind.price + slDist
+              : 0,
+        takeProfit:
+          ruleSignal === "BUY"
+            ? ind.price + tpDist
+            : ruleSignal === "SELL"
+              ? ind.price - tpDist
+              : 0,
+        confidence: ruleSignal === "HOLD" ? 0 : 60,
+        reason: "Rule-based signal (AI disabled)",
+      };
+    }
+
+    const payload = {
+      pair: symbol,
+      timeframe: "15m",
       price: ind.price,
-      signal: validated.signal,
-      stopLoss: validated.stopLoss,
-      takeProfit: validated.takeProfit,
-      confidence: validated.confidence,
-      reason: validated.reason ?? "",
-      ruleSignal,
-      rsi: ind.rsi,
-      ema50: ind.ema50,
-      ema200: ind.ema200,
-      atr: ind.atr,
-      volumeTrend: ind.volumeTrend,
-    }).catch((err) =>
-      console.error(`[Email] Failed to send for ${symbol}:`, err.message),
+      indicators: {
+        rsi: ind.rsi,
+        ema50: ind.ema50,
+        ema200: ind.ema200,
+        macd: {
+          line: ind.macdLine,
+          signal: ind.signalLine,
+          histogram: ind.histogram,
+        },
+        bollingerBands: {
+          upper: ind.bb.upper,
+          middle: ind.bb.middle,
+          lower: ind.bb.lower,
+        },
+        atr: ind.atr,
+        volumeTrend: ind.volumeTrend,
+      },
+      ruleBasedSignal: ruleSignal,
+      aiPrediction: validated,
+    };
+
+    // Fire-and-forget email for BUY / SELL
+    if (validated.signal === "BUY" || validated.signal === "SELL") {
+      sendSignalEmail({
+        symbol,
+        price: ind.price,
+        signal: validated.signal,
+        stopLoss: validated.stopLoss,
+        takeProfit: validated.takeProfit,
+        confidence: validated.confidence,
+        reason: validated.reason ?? "",
+        ruleSignal,
+        rsi: ind.rsi,
+        ema50: ind.ema50,
+        ema200: ind.ema200,
+        atr: ind.atr,
+        volumeTrend: ind.volumeTrend,
+      }).catch((err) =>
+        console.error(`[Email] Failed to send for ${symbol}:`, err.message),
+      );
+    }
+
+    return payload;
+  } catch (error: any) {
+    console.error(
+      `Error generating signal for ${symbol}:`,
+      error?.message ?? error,
+    );
+    throw new Error(
+      `Failed to generate signal for ${symbol}: ${error?.message ?? error}`,
     );
   }
-
-  return payload;
 }
 
 // ─── Route ───────────────────────────────────────────────────────────────────
@@ -510,23 +588,28 @@ app.listen(PORT, () => {
 
   // Run once immediately on startup, then every intervalMs
   const runAll = () => {
-    const timestamp = new Date().toISOString();
-    console.log(
-      `\n[Scheduler] ⏱  ${timestamp} — scanning ${watchSymbols.length} symbol(s)...`,
-    );
-    for (const sym of watchSymbols) {
-      generateSignal(sym)
-        .then((r) => {
-          const sig = r.aiPrediction.signal;
-          const conf = r.aiPrediction.confidence;
-          const emoji = sig === "BUY" ? "🟢" : sig === "SELL" ? "🔴" : "⚪";
-          console.log(
-            `[Scheduler] ${emoji} ${sym}: ${sig} (confidence: ${conf}%) @ ${r.price}`,
+    try {
+      const timestamp = new Date().toISOString();
+      console.log(
+        `\n[Scheduler] ⏱  ${timestamp} — scanning ${watchSymbols.length} symbol(s)...`,
+      );
+
+      for (const sym of watchSymbols) {
+        generateSignal(sym)
+          .then((r) => {
+            const sig = r.aiPrediction.signal;
+            const conf = r.aiPrediction.confidence;
+            const emoji = sig === "BUY" ? "🟢" : sig === "SELL" ? "🔴" : "⚪";
+            console.log(
+              `[Scheduler] ${emoji} ${sym}: ${sig} (confidence: ${conf}%) @ ${r.price}`,
+            );
+          })
+          .catch((err) =>
+            console.error(`[Scheduler] ❌ ${sym} failed:`, err.message),
           );
-        })
-        .catch((err) =>
-          console.error(`[Scheduler] ❌ ${sym} failed:`, err.message),
-        );
+      }
+    } catch (error) {
+      console.log("error in scheduler loop:", error);
     }
   };
 

@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon --exec tsx src/server.ts",
-    "start": "tsx src/server.ts"
+    "start": "tsx src/server.ts",
+    "backtest": "tsx backtest.ts"
   },
   "keywords": [],
   "author": "",
